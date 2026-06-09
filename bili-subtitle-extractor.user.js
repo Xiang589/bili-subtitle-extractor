@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         Bilibili 字幕提取器
 // @namespace    local.bili.transcript
-// @version      0.1.0
+// @version      0.1.1
 // @description  提取当前 Bilibili 视频已有字幕并导出为 Markdown / TXT / SRT / JSON
+// @license      MIT
+// @homepageURL  https://github.com/Xiang589/bili-subtitle-extractor
 // @match        https://www.bilibili.com/video/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
@@ -112,6 +114,10 @@
     }
 
     const info = normalizeVideoInfo(data, bvid);
+    if (info.bvid && String(info.bvid).toLowerCase() !== String(bvid).toLowerCase()) {
+      return null;
+    }
+
     if (!info.cid && info.pages.length === 0) {
       return null;
     }
@@ -224,6 +230,14 @@
         throw makeUserError('字幕需要登录，请先在浏览器中登录 Bilibili 后重试。', json);
       }
       throw makeUserError('无法获取字幕轨', json);
+    }
+
+    if (json.data && json.data.need_login_subtitle) {
+      throw makeUserError('该视频字幕可能需要登录或权限校验。当前脚本不会发送 Cookie，因此不会读取这类字幕。', json.data);
+    }
+
+    if (json.data && json.data.v_voucher) {
+      throw makeUserError('Bilibili 返回 WBI 风控校验，当前版本暂不支持签名重试。', json.data);
     }
 
     const subtitles = json.data && json.data.subtitle && json.data.subtitle.subtitles;

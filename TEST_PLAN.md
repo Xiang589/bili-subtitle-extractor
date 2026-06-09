@@ -1,6 +1,6 @@
 # TEST_PLAN
 
-以下为 v0.1 手动测试计划。测试前请安装 `bili-subtitle-extractor.user.js`，并确认浏览器已启用 Tampermonkey。
+以下为 v0.1.1 手动测试计划。测试前请安装 `bili-subtitle-extractor.user.js`，并确认浏览器已启用 Tampermonkey。
 
 ## 1. 单 P 有字幕视频
 
@@ -55,3 +55,19 @@
 3. 导出格式输入 `json`。
 4. 预期：下载 JSON 文件可被 `JSON.parse` 解析。
 5. 预期：JSON 包含 `title/source/url/bvid/cid/page/track/body` 字段。
+
+## 8. SPA 跳转测试
+
+1. 打开一个 Bilibili 视频页面。
+2. 不刷新浏览器标签页，通过站内链接跳转到另一个 Bilibili 视频页面。
+3. 点击右下角“提取字幕”。
+4. 预期：脚本不会使用旧视频的 `cid` 或标题。
+5. 预期：若页面内 `__INITIAL_STATE__` 仍是旧 BV 号，脚本会走 API fallback 获取当前视频信息。
+
+## 9. 权限字幕测试
+
+1. 构造或观察接口返回 `need_login_subtitle` 的视频。
+2. 点击右下角“提取字幕”。
+3. 预期：弹窗提示登录或权限限制。
+4. 预期：不生成空文件。
+5. 预期：脚本不崩溃，并且不会改为发送 Cookie。
