@@ -13,6 +13,8 @@ from export import SUPPORTED_FORMATS, build_payload, export_transcript
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = Path(os.getenv("ASR_UPLOAD_DIR", BASE_DIR / "tmp" / "uploads"))
+DEFAULT_MAX_UPLOAD_MB = 200
+MAX_UPLOAD_BYTES = DEFAULT_MAX_UPLOAD_MB * 1024 * 1024
 
 app = FastAPI(title="bili-subtitle-extractor local ASR service", version="0.2-alpha")
 app.add_middleware(
@@ -34,6 +36,7 @@ async def health():
         "model": settings["model"],
         "device": settings["device"],
         "compute_type": settings["compute_type"],
+        "max_upload_mb": round(get_max_upload_bytes() / 1024 / 1024, 2),
     }
 
 
@@ -80,11 +83,35 @@ async def save_upload(file: UploadFile) -> Path:
     if not data:
         raise HTTPException(status_code=400, detail="上传音频为空。")
 
+    max_upload_bytes = get_max_upload_bytes()
+    if len(data) > max_upload_bytes:
+        max_upload_mb = max_upload_bytes / 1024 / 1024
+        raise HTTPException(
+            status_code=413,
+            detail=f"上传音频超过限制：最大 {max_upload_mb:g} MB。可通过 ASR_MAX_UPLOAD_MB 调整。",
+        )
+
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     suffix = Path(file.filename or "recording.webm").suffix or ".webm"
     audio_path = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
     audio_path.write_bytes(data)
     return audio_path
+
+
+def get_max_upload_bytes() -> int:
+    raw_value = os.getenv("ASR_MAX_UPLOAD_MB")
+    if not raw_value:
+        return MAX_UPLOAD_BYTES
+
+    try:
+        max_upload_mb = float(raw_value)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="ASR_MAX_UPLOAD_MB 必须是数字。") from error
+
+    if max_upload_mb <= 0:
+        raise HTTPException(status_code=400, detail="ASR_MAX_UPLOAD_MB 必须大于 0。")
+
+    return int(max_upload_mb * 1024 * 1024)
 
 
 def main():

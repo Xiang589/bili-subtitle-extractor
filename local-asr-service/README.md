@@ -2,6 +2,8 @@
 
 这是 `bili-subtitle-extractor` v0.2-alpha 的本机转写服务。Chrome 扩展会把当前标签页录制得到的 `webm/opus` 音频发送到 `http://127.0.0.1:8765/transcribe`，服务在本机使用 `faster-whisper` 转写并返回 Markdown / TXT / SRT / JSON 文档内容。
 
+Chrome 扩展要求 Chrome 116+。扩展默认最大录音时长为 10 分钟。
+
 ## 启动
 
 ```bash
@@ -54,6 +56,17 @@ uvicorn app:app --host 127.0.0.1 --port 8765
 ```
 
 首次使用真实模型时，`faster-whisper` 可能需要下载模型文件到本机缓存目录。
+
+## 上传限制
+
+默认最大上传体积为 200MB。可以通过环境变量调整：
+
+```bash
+$env:ASR_MAX_UPLOAD_MB="300"
+uvicorn app:app --host 127.0.0.1 --port 8765
+```
+
+超过限制时，服务会返回 HTTP 413 和友好错误信息。
 
 ## 临时文件
 

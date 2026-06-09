@@ -39,6 +39,8 @@ local-asr-service/
 
 录制由用户主动开始和停止。popup 关闭后，offscreen document 会继续持有 `MediaRecorder`，录音不会因为 popup 关闭而中断。
 
+扩展要求 Chrome 116+。默认最大录音时长为 10 分钟，达到上限后会自动停止录制并继续走上传和下载流程。
+
 ## 本地服务启动
 
 ```bash
@@ -81,6 +83,12 @@ python app.py --mock
 ASR_MODEL=base
 ASR_DEVICE=cpu
 ASR_COMPUTE_TYPE=int8
+```
+
+默认最大上传体积为 200MB，可通过 `ASR_MAX_UPLOAD_MB` 调整：
+
+```bash
+$env:ASR_MAX_UPLOAD_MB="300"
 ```
 
 可设置为：

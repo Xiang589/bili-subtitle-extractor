@@ -1,11 +1,14 @@
 'use strict';
 
+const MAX_RECORDING_MS = 10 * 60 * 1000;
+
 let mediaRecorder = null;
 let capturedStream = null;
 let audioContext = null;
 let sourceNode = null;
 let chunks = [];
 let startedAt = null;
+let maxRecordingTimer = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message)
@@ -78,6 +81,9 @@ async function startRecording(streamId) {
   };
 
   mediaRecorder.start(1000);
+  maxRecordingTimer = window.setTimeout(() => {
+    stopRecording();
+  }, MAX_RECORDING_MS);
   await chrome.runtime.sendMessage({ type: 'OFFSCREEN_RECORDING_STARTED', startedAt });
 }
 
@@ -140,6 +146,11 @@ function blobToDataUrl(blob) {
 }
 
 function cleanupMedia() {
+  if (maxRecordingTimer) {
+    window.clearTimeout(maxRecordingTimer);
+    maxRecordingTimer = null;
+  }
+
   if (capturedStream) {
     capturedStream.getTracks().forEach((track) => track.stop());
     capturedStream = null;
