@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bilibili 本地 ASR</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --blue: #00a1d6;
+      --text: #1f2933;
+      --muted: #687482;
+      --line: #d8dee6;
+      --bg: #f7f9fb;
+      --danger: #c2410c;
+      --ok: #047857;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 340px;
+      margin: 0;
+      padding: 16px;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    h1 {
+      margin: 0 0 14px;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .panel {
+      margin-bottom: 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 8px 0;
+    }
+
+    .row:first-child {
+      margin-top: 0;
+    }
+
+    .row:last-child {
+      margin-bottom: 0;
+    }
+
+    .label {
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .value {
+      min-width: 0;
+      text-align: right;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+
+    .status-ok {
+      color: var(--ok);
+    }
+
+    .status-error {
+      color: var(--danger);
+    }
+
+    select,
+    button {
+      width: 100%;
+      min-height: 36px;
+      border-radius: 6px;
+      font: inherit;
+    }
+
+    select {
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    button {
+      border: 0;
+      color: #fff;
+      background: var(--blue);
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    button.secondary {
+      background: #334155;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+    }
+
+    #message {
+      min-height: 20px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Bilibili 本地 ASR</h1>
+
+  <section class="panel" aria-label="状态">
+    <div class="row">
+      <span class="label">本地服务</span>
+      <span id="serviceStatus" class="value">检测中</span>
+    </div>
+    <div class="row">
+      <span class="label">当前标签页</span>
+      <span id="tabTitle" class="value">读取中</span>
+    </div>
+    <div class="row">
+      <span class="label">录制状态</span>
+      <span id="recordStatus" class="value">空闲</span>
+    </div>
+    <div class="row">
+      <span class="label">计时</span>
+      <span id="timer" class="value">00:00</span>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="导出">
+    <div class="row">
+      <span class="label">导出格式</span>
+      <span class="value">
+        <select id="formatSelect" aria-label="导出格式">
+          <option value="md">Markdown</option>
+          <option value="txt">TXT</option>
+          <option value="srt">SRT</option>
+          <option value="json">JSON</option>
+        </select>
+      </span>
+    </div>
+  </section>
+
+  <div class="actions">
+    <button id="startButton" type="button">开始录音</button>
+    <button id="stopButton" class="secondary" type="button" disabled>停止</button>
+  </div>
+
+  <div id="message" role="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
