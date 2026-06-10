@@ -1,10 +1,12 @@
 'use strict';
 
 const HEALTH_URL = 'http://127.0.0.1:8765/health';
+const STARTABLE_STATES = new Set(['idle', 'done', 'error']);
+const BUSY_STATES = new Set(['starting', 'stopping', 'uploading']);
 
 const elements = {};
 let serviceOnline = false;
-let currentState = null;
+let currentState = { status: 'idle' };
 let timerHandle = null;
 
 function byId(id) {
@@ -52,32 +54,41 @@ async function refreshTabInfo() {
 }
 
 async function refreshRecordingStatus() {
-  const response = await sendMessage({ type: 'GET_STATUS' });
-  currentState = response && response.state ? response.state : null;
-  const status = currentState ? currentState.status : 'idle';
+  const response = await sendMessage({ type: 'getState' });
+  if (response && response.state) {
+    renderState(response.state);
+  }
+}
+
+function renderState(nextState) {
+  currentState = nextState || { status: 'idle' };
+  const status = currentState.status || 'idle';
   const labels = {
-    idle: '空闲',
-    starting: '准备中',
+    idle: '未录制',
+    starting: '正在启动录音…',
     recording: '录制中',
-    stopping: '停止中',
-    transcribing: '转写中',
-    completed: '已完成',
+    stopping: '正在停止录音…',
+    uploading: '正在生成字幕…',
+    done: '完成',
     error: '错误'
   };
 
   elements.recordStatus.textContent = labels[status] || status;
   elements.recordStatus.className = status === 'error' ? 'value status-error' : 'value';
 
-  const isRecording = status === 'recording' || status === 'starting' || status === 'stopping' || status === 'transcribing';
-  elements.startButton.disabled = isRecording || !serviceOnline;
+  const canStart = STARTABLE_STATES.has(status) && serviceOnline;
+  elements.startButton.disabled = !canStart;
   elements.stopButton.disabled = status !== 'recording';
+  elements.resetButton.disabled = false;
 
   if (!serviceOnline) {
     setMessage('请先启动本地 ASR 服务。', true);
   } else if (status === 'error' && currentState.error) {
     setMessage(currentState.error, true);
-  } else if (status === 'completed') {
-    setMessage('转写完成，已触发下载。', false);
+  } else if (status === 'done') {
+    setMessage('字幕生成完成，已触发下载。', false);
+  } else if (BUSY_STATES.has(status)) {
+    setMessage(labels[status], false);
   } else {
     setMessage('', false);
   }
@@ -106,19 +117,36 @@ async function startRecording() {
 
   const format = elements.formatSelect.value || 'md';
   await chrome.storage.local.set({ exportFormat: format });
-  const response = await sendMessage({ type: 'START_RECORDING', format, language: 'zh' });
-  if (!response || !response.ok) {
-    setMessage((response && response.error) || '启动录音失败。', true);
+  const shouldResetBeforeStart = currentState.status === 'error';
+  renderState({ ...currentState, status: 'starting', error: '' });
+
+  if (shouldResetBeforeStart) {
+    await sendMessage({ type: 'resetRecording' });
   }
-  await refreshRecordingStatus();
+
+  const response = await sendMessage({ type: 'startRecording', format, language: 'zh' });
+  if (!response || !response.ok) {
+    renderState((response && response.state) || { status: 'error', error: (response && response.error) || '启动录音失败。' });
+    return;
+  }
+
+  renderState(response.state);
 }
 
 async function stopRecording() {
-  const response = await sendMessage({ type: 'STOP_RECORDING' });
+  renderState({ ...currentState, status: 'stopping', error: '' });
+  const response = await sendMessage({ type: 'stopRecording' });
   if (!response || !response.ok) {
-    setMessage((response && response.error) || '停止录音失败。', true);
+    renderState((response && response.state) || { status: 'error', error: (response && response.error) || '停止录音失败。' });
+    return;
   }
-  await refreshRecordingStatus();
+
+  renderState(response.state);
+}
+
+async function resetRecording() {
+  const response = await sendMessage({ type: 'resetRecording' });
+  renderState((response && response.state) || { status: 'idle' });
 }
 
 async function refreshAll() {
@@ -133,12 +161,14 @@ async function init() {
   elements.timer = byId('timer');
   elements.startButton = byId('startButton');
   elements.stopButton = byId('stopButton');
+  elements.resetButton = byId('resetButton');
   elements.formatSelect = byId('formatSelect');
   elements.message = byId('message');
 
   await loadStoredFormat();
-  elements.startButton.addEventListener('click', startRecording);
-  elements.stopButton.addEventListener('click', stopRecording);
+  elements.startButton.addEventListener('click', () => startRecording().catch((error) => renderState({ status: 'error', error: error.message })));
+  elements.stopButton.addEventListener('click', () => stopRecording().catch((error) => renderState({ status: 'error', error: error.message })));
+  elements.resetButton.addEventListener('click', () => resetRecording().catch((error) => renderState({ status: 'error', error: error.message })));
   elements.formatSelect.addEventListener('change', () => chrome.storage.local.set({ exportFormat: elements.formatSelect.value }));
 
   await refreshAll();

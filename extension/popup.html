@@ -116,6 +116,13 @@
       background: #334155;
     }
 
+    button.ghost {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+    }
+
     button:disabled {
       cursor: not-allowed;
       opacity: 0.45;
@@ -169,6 +176,7 @@
     <button id="startButton" type="button">开始录音</button>
     <button id="stopButton" class="secondary" type="button" disabled>停止</button>
   </div>
+  <button id="resetButton" class="ghost" type="button">重置状态</button>
 
   <div id="message" role="status"></div>
 

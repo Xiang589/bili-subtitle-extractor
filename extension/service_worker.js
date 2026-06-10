@@ -4,24 +4,19 @@ const ASR_ENDPOINT = 'http://127.0.0.1:8765/transcribe';
 const DEFAULT_LANGUAGE = 'zh';
 const DEFAULT_FORMAT = 'md';
 const RECORDING_FILE_NAME = 'tab-audio.webm';
+const ACTIVE_STREAM_ERROR = '当前标签页已有未释放的录音流。请点击重置状态，或刷新扩展/重新打开标签页后重试。';
+const STATES = new Set(['idle', 'starting', 'recording', 'stopping', 'uploading', 'done', 'error']);
+const STARTABLE_STATES = new Set(['idle', 'done', 'error']);
 
-let state = {
-  status: 'idle',
-  error: '',
-  startedAt: null,
-  tabId: null,
-  title: '',
-  sourceUrl: '',
-  format: DEFAULT_FORMAT,
-  language: DEFAULT_LANGUAGE
-};
+let recorderState = 'idle';
+let state = createState('idle');
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
     .then((response) => sendResponse(response))
-    .catch((error) => {
-      setError(error.message || '操作失败。');
-      sendResponse({ ok: false, error: error.message || String(error) });
+    .catch(async (error) => {
+      await failRecorder(error.message || '操作失败。');
+      sendResponse({ ok: false, error: state.error, state: getStateSnapshot() });
     });
   return true;
 });
@@ -31,53 +26,54 @@ async function handleMessage(message) {
     throw new Error('未知消息。');
   }
 
-  if (message.type === 'GET_STATUS') {
-    return { ok: true, state };
+  if (message.type === 'getState' || message.type === 'GET_STATUS') {
+    return { ok: true, state: getStateSnapshot() };
   }
 
-  if (message.type === 'START_RECORDING') {
+  if (message.type === 'startRecording' || message.type === 'START_RECORDING') {
     return startRecording(message);
   }
 
-  if (message.type === 'STOP_RECORDING') {
+  if (message.type === 'stopRecording' || message.type === 'STOP_RECORDING') {
     return stopRecording();
   }
 
-  if (message.type === 'OFFSCREEN_RECORDING_STARTED') {
-    state = {
-      ...state,
-      status: 'recording',
-      error: '',
-      startedAt: message.startedAt || Date.now()
-    };
-    return { ok: true };
+  if (message.type === 'resetRecording') {
+    return resetRecording();
   }
 
-  if (message.type === 'OFFSCREEN_RECORDING_STOPPED') {
-    await handleRecordedData(message);
-    return { ok: true };
+  if (message.type === 'offscreenRecordingStopped') {
+    await handleRecordedData(message.recording || message);
+    return { ok: true, state: getStateSnapshot() };
   }
 
-  if (message.type === 'OFFSCREEN_RECORDING_ERROR') {
-    setError(message.error || '录音失败。');
-    return { ok: true };
+  if (message.type === 'offscreenRecordingError') {
+    await failRecorder(message.error || '录音失败。');
+    return { ok: true, state: getStateSnapshot() };
   }
 
   throw new Error(`未支持的消息：${message.type}`);
 }
 
 async function startRecording(message) {
-  if (state.status === 'recording' || state.status === 'starting' || state.status === 'stopping' || state.status === 'transcribing') {
-    throw new Error('已有录音任务正在进行。');
+  if (!STARTABLE_STATES.has(recorderState)) {
+    return {
+      ok: false,
+      error: '已有录音任务正在进行，请先停止或重置状态。',
+      state: getStateSnapshot()
+    };
+  }
+
+  if (recorderState === 'error') {
+    await cleanupOffscreen();
   }
 
   const activeTab = await getActiveTab();
   if (!activeTab || !activeTab.id) {
-    throw new Error('无法读取当前活动标签页。');
+    return failResponse('无法读取当前活动标签页。');
   }
 
-  state = {
-    status: 'starting',
+  setRecorderState('starting', {
     error: '',
     startedAt: null,
     tabId: activeTab.id,
@@ -85,53 +81,80 @@ async function startRecording(message) {
     sourceUrl: activeTab.url || '',
     format: normalizeFormat(message.format),
     language: message.language || DEFAULT_LANGUAGE
-  };
-
-  await ensureOffscreenDocument();
-  const streamId = await getMediaStreamId(activeTab.id);
-  await chrome.runtime.sendMessage({
-    type: 'OFFSCREEN_START_RECORDING',
-    streamId,
-    title: state.title,
-    sourceUrl: state.sourceUrl,
-    format: state.format,
-    language: state.language
   });
 
-  return { ok: true, state };
+  try {
+    await ensureOffscreenDocument();
+    const streamId = await getMediaStreamId(activeTab.id);
+    const response = await chrome.runtime.sendMessage({
+      type: 'offscreenStartRecording',
+      streamId
+    });
+
+    if (!response || !response.ok) {
+      throw new Error((response && response.error) || '启动录音失败。');
+    }
+
+    setRecorderState('recording', {
+      error: '',
+      startedAt: response.startedAt || Date.now()
+    });
+    return { ok: true, state: getStateSnapshot() };
+  } catch (error) {
+    await cleanupOffscreen();
+    return failResponse(toFriendlyCaptureError(error));
+  }
 }
 
 async function stopRecording() {
-  if (state.status !== 'recording') {
-    throw new Error('当前没有正在录制的任务。');
+  if (recorderState !== 'recording') {
+    return {
+      ok: false,
+      error: '当前没有正在录制的任务。',
+      state: getStateSnapshot()
+    };
   }
 
-  state = {
-    ...state,
-    status: 'stopping'
-  };
-
-  await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP_RECORDING' });
-  return { ok: true, state };
-}
-
-async function handleRecordedData(message) {
-  state = {
-    ...state,
-    status: 'transcribing',
-    error: ''
-  };
+  setRecorderState('stopping', { error: '' });
 
   try {
-    const result = await uploadToLocalAsr(message.dataUrl, message.mimeType || 'audio/webm');
-    await downloadTranscription(result);
-    state = {
-      ...state,
-      status: 'completed',
-      startedAt: null
-    };
+    const response = await chrome.runtime.sendMessage({ type: 'offscreenStopRecording' });
+    if (!response || !response.ok || !response.recording) {
+      throw new Error((response && response.error) || '停止录音失败。');
+    }
+
+    await handleRecordedData(response.recording);
+    return { ok: true, state: getStateSnapshot() };
   } catch (error) {
-    setError(error.message || '本地 ASR 转写失败。');
+    await cleanupOffscreen();
+    return failResponse(toFriendlyCaptureError(error));
+  }
+}
+
+async function resetRecording() {
+  await cleanupOffscreen();
+  state = createState('idle', {
+    format: state.format || DEFAULT_FORMAT,
+    language: state.language || DEFAULT_LANGUAGE
+  });
+  recorderState = 'idle';
+  return { ok: true, state: getStateSnapshot() };
+}
+
+async function handleRecordedData(recording) {
+  setRecorderState('uploading', { error: '', startedAt: null });
+
+  try {
+    const normalizedRecording = normalizeRecording(recording);
+    if (!normalizedRecording) {
+      throw new Error('录音数据为空。');
+    }
+    const result = await uploadToLocalAsr(normalizedRecording.dataUrl, normalizedRecording.mimeType || 'audio/webm');
+    await downloadTranscription(result);
+    setRecorderState('done', { startedAt: null, error: '' });
+  } catch (error) {
+    await cleanupOffscreen();
+    await failRecorder(error.message || '本地 ASR 转写失败。');
   }
 }
 
@@ -168,6 +191,24 @@ function getMediaStreamId(tabId) {
       resolve(streamId);
     });
   });
+}
+
+async function cleanupOffscreen() {
+  if (!(await chrome.offscreen.hasDocument())) {
+    return;
+  }
+
+  try {
+    await chrome.runtime.sendMessage({ type: 'offscreenCleanup' });
+  } catch (error) {
+    // The offscreen document may already be closing; cleanup remains best-effort.
+  }
+
+  try {
+    await chrome.offscreen.closeDocument();
+  } catch (error) {
+    // Ignore close races so reset can always return a stable idle state.
+  }
 }
 
 async function uploadToLocalAsr(dataUrl, mimeType) {
@@ -240,6 +281,63 @@ async function downloadTranscription(result) {
   });
 }
 
+function createState(status, overrides) {
+  return {
+    status,
+    error: '',
+    startedAt: null,
+    tabId: null,
+    title: '',
+    sourceUrl: '',
+    format: DEFAULT_FORMAT,
+    language: DEFAULT_LANGUAGE,
+    ...(overrides || {})
+  };
+}
+
+function setRecorderState(status, overrides) {
+  if (!STATES.has(status)) {
+    throw new Error(`未知录音状态：${status}`);
+  }
+
+  recorderState = status;
+  state = {
+    ...state,
+    status,
+    ...(overrides || {})
+  };
+}
+
+function getStateSnapshot() {
+  return {
+    ...state,
+    status: recorderState
+  };
+}
+
+async function failRecorder(error) {
+  setRecorderState('error', {
+    error: error || '操作失败。',
+    startedAt: null
+  });
+}
+
+function failResponse(error) {
+  setRecorderState('error', {
+    error: error || '操作失败。',
+    startedAt: null
+  });
+  return { ok: false, error: state.error, state: getStateSnapshot() };
+}
+
+function toFriendlyCaptureError(error) {
+  const message = error && error.message ? error.message : String(error || '');
+  if (/active stream|Cannot capture a tab with an active stream/i.test(message)) {
+    return ACTIVE_STREAM_ERROR;
+  }
+  return message || '录音失败。';
+}
+
 function assertLocalAsrEndpoint(endpoint) {
   const url = new URL(endpoint);
   if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') {
@@ -250,6 +348,19 @@ function assertLocalAsrEndpoint(endpoint) {
 function normalizeFormat(format) {
   const candidate = String(format || DEFAULT_FORMAT).toLowerCase();
   return ['md', 'txt', 'srt', 'json'].includes(candidate) ? candidate : DEFAULT_FORMAT;
+}
+
+function normalizeRecording(recording) {
+  if (!recording) {
+    return null;
+  }
+  if (recording.dataUrl) {
+    return recording;
+  }
+  if (recording.recording && recording.recording.dataUrl) {
+    return recording.recording;
+  }
+  return null;
 }
 
 function getMimeType(format) {
@@ -270,13 +381,4 @@ function safeFileName(name) {
     .slice(0, 180);
 
   return cleaned || 'bilibili-local-asr.md';
-}
-
-function setError(error) {
-  state = {
-    ...state,
-    status: 'error',
-    error: error || '操作失败。',
-    startedAt: null
-  };
 }

@@ -1,21 +1,27 @@
 'use strict';
 
 const MAX_RECORDING_MS = 10 * 60 * 1000;
+const ACTIVE_STREAM_ERROR = '当前标签页已有未释放的录音流。请点击重置状态，或刷新扩展/重新打开标签页后重试。';
 
 let mediaRecorder = null;
-let capturedStream = null;
+let mediaStream = null;
 let audioContext = null;
 let sourceNode = null;
 let chunks = [];
 let startedAt = null;
 let maxRecordingTimer = null;
+let stopPromise = null;
+let stopResolve = null;
+let stopReject = null;
+let recorderMimeType = '';
+let finalizing = false;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message)
     .then((response) => sendResponse(response))
     .catch((error) => {
-      notifyError(error);
-      sendResponse({ ok: false, error: error.message || String(error) });
+      cleanupMedia();
+      sendResponse({ ok: false, error: toFriendlyCaptureError(error) });
     });
   return true;
 });
@@ -25,13 +31,18 @@ async function handleMessage(message) {
     throw new Error('未知消息。');
   }
 
-  if (message.type === 'OFFSCREEN_START_RECORDING') {
-    await startRecording(message.streamId);
-    return { ok: true };
+  if (message.type === 'offscreenStartRecording') {
+    const response = await startRecording(message.streamId);
+    return { ok: true, ...response };
   }
 
-  if (message.type === 'OFFSCREEN_STOP_RECORDING') {
-    stopRecording();
+  if (message.type === 'offscreenStopRecording') {
+    const recording = await stopRecording('manual');
+    return { ok: true, recording };
+  }
+
+  if (message.type === 'offscreenCleanup') {
+    cleanupMedia();
     return { ok: true };
   }
 
@@ -39,31 +50,39 @@ async function handleMessage(message) {
 }
 
 async function startRecording(streamId) {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    throw new Error('录音已经在进行。');
+  if (hasActiveRecording()) {
+    throw new Error(ACTIVE_STREAM_ERROR);
   }
 
   if (!streamId) {
     throw new Error('缺少当前标签页音频流 ID。');
   }
 
+  cleanupMedia();
   chunks = [];
   startedAt = Date.now();
-  capturedStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      mandatory: {
-        chromeMediaSource: 'tab',
-        chromeMediaSourceId: streamId
-      }
-    },
-    video: false
-  });
+  finalizing = false;
 
-  connectAudioBackToOutput(capturedStream);
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        mandatory: {
+          chromeMediaSource: 'tab',
+          chromeMediaSourceId: streamId
+        }
+      },
+      video: false
+    });
+  } catch (error) {
+    cleanupMedia();
+    throw new Error(toFriendlyCaptureError(error));
+  }
 
-  const mimeType = chooseMimeType();
-  const recorderOptions = mimeType ? { mimeType } : {};
-  mediaRecorder = new MediaRecorder(capturedStream, recorderOptions);
+  connectAudioBackToOutput(mediaStream);
+
+  recorderMimeType = chooseMimeType();
+  const recorderOptions = recorderMimeType ? { mimeType: recorderMimeType } : {};
+  mediaRecorder = new MediaRecorder(mediaStream, recorderOptions);
 
   mediaRecorder.ondataavailable = (event) => {
     if (event.data && event.data.size > 0) {
@@ -72,43 +91,77 @@ async function startRecording(streamId) {
   };
 
   mediaRecorder.onerror = (event) => {
-    notifyError(event.error || new Error('MediaRecorder 录音失败。'));
-    cleanupMedia();
+    const error = event.error || new Error('MediaRecorder 录音失败。');
+    rejectStop(error);
+    notifyError(error);
   };
 
   mediaRecorder.onstop = () => {
-    finishRecording(mimeType || mediaRecorder.mimeType || 'audio/webm').catch((error) => notifyError(error));
+    finishRecording().catch((error) => {
+      rejectStop(error);
+      notifyError(error);
+    });
   };
 
   mediaRecorder.start(1000);
   maxRecordingTimer = window.setTimeout(() => {
-    stopRecording();
+    stopRecording('timeout')
+      .then((recording) => {
+        if (recording) {
+          chrome.runtime.sendMessage({ type: 'offscreenRecordingStopped', recording });
+        }
+      })
+      .catch((error) => notifyError(error));
   }, MAX_RECORDING_MS);
-  await chrome.runtime.sendMessage({ type: 'OFFSCREEN_RECORDING_STARTED', startedAt });
+
+  return { startedAt };
 }
 
-function stopRecording() {
+function stopRecording(reason) {
+  if (stopPromise) {
+    return stopPromise;
+  }
+
+  stopPromise = new Promise((resolve, reject) => {
+    stopResolve = resolve;
+    stopReject = reject;
+  });
+
   if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+    resolveStop(null);
+    return stopPromise;
+  }
+
+  try {
+    mediaRecorder.stop();
+  } catch (error) {
+    rejectStop(error);
+  }
+
+  return stopPromise;
+}
+
+async function finishRecording() {
+  if (finalizing) {
+    return;
+  }
+  finalizing = true;
+
+  const durationMs = startedAt ? Date.now() - startedAt : 0;
+  const mimeType = recorderMimeType || (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
+  const blob = new Blob(chunks, { type: mimeType });
+
+  cleanupMedia({ stopRecorder: false, clearStopPromise: false });
+
+  if (!blob.size) {
+    rejectStop(new Error('录音结果为空。'));
     return;
   }
 
-  mediaRecorder.stop();
-}
-
-async function finishRecording(mimeType) {
-  const durationMs = startedAt ? Date.now() - startedAt : 0;
-  const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
-  cleanupMedia();
-
-  if (!blob.size) {
-    throw new Error('录音结果为空。');
-  }
-
   const dataUrl = await blobToDataUrl(blob);
-  await chrome.runtime.sendMessage({
-    type: 'OFFSCREEN_RECORDING_STOPPED',
+  resolveStop({
     dataUrl,
-    mimeType: blob.type || mimeType || 'audio/webm',
+    mimeType: blob.type || mimeType,
     durationMs
   });
 }
@@ -145,19 +198,44 @@ function blobToDataUrl(blob) {
   });
 }
 
-function cleanupMedia() {
+function cleanupMedia(options) {
+  const settings = {
+    stopRecorder: true,
+    clearStopPromise: true,
+    ...(options || {})
+  };
+
   if (maxRecordingTimer) {
     window.clearTimeout(maxRecordingTimer);
     maxRecordingTimer = null;
   }
 
-  if (capturedStream) {
-    capturedStream.getTracks().forEach((track) => track.stop());
-    capturedStream = null;
+  const recorder = mediaRecorder;
+  mediaRecorder = null;
+  if (recorder) {
+    recorder.ondataavailable = null;
+    recorder.onerror = null;
+    recorder.onstop = null;
+    if (settings.stopRecorder && recorder.state !== 'inactive') {
+      try {
+        recorder.stop();
+      } catch (error) {
+        // Stop is best-effort during cleanup.
+      }
+    }
+  }
+
+  if (mediaStream) {
+    mediaStream.getTracks().forEach((track) => track.stop());
+    mediaStream = null;
   }
 
   if (sourceNode) {
-    sourceNode.disconnect();
+    try {
+      sourceNode.disconnect();
+    } catch (error) {
+      // Disconnect is idempotent for our purposes.
+    }
     sourceNode = null;
   }
 
@@ -166,15 +244,60 @@ function cleanupMedia() {
     audioContext = null;
   }
 
-  mediaRecorder = null;
   chunks = [];
   startedAt = null;
+  recorderMimeType = '';
+  finalizing = false;
+  if (settings.clearStopPromise) {
+    stopPromise = null;
+    stopResolve = null;
+    stopReject = null;
+  }
+}
+
+function hasActiveRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    return true;
+  }
+  if (!mediaStream) {
+    return false;
+  }
+  return mediaStream.getTracks().some((track) => track.readyState === 'live');
+}
+
+function resolveStop(recording) {
+  const resolver = stopResolve;
+  stopPromise = null;
+  stopResolve = null;
+  stopReject = null;
+  if (resolver) {
+    resolver(recording);
+  }
+}
+
+function rejectStop(error) {
+  const rejecter = stopReject;
+  stopPromise = null;
+  stopResolve = null;
+  stopReject = null;
+  cleanupMedia({ clearStopPromise: false });
+  if (rejecter) {
+    rejecter(error);
+  }
 }
 
 function notifyError(error) {
   cleanupMedia();
   chrome.runtime.sendMessage({
-    type: 'OFFSCREEN_RECORDING_ERROR',
-    error: error && error.message ? error.message : String(error)
+    type: 'offscreenRecordingError',
+    error: toFriendlyCaptureError(error)
   });
+}
+
+function toFriendlyCaptureError(error) {
+  const message = error && error.message ? error.message : String(error || '');
+  if (/active stream|Cannot capture a tab with an active stream/i.test(message)) {
+    return ACTIVE_STREAM_ERROR;
+  }
+  return message || '录音失败。';
 }
