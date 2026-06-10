@@ -12,11 +12,15 @@ node_modules/
 dist/
 build/
 coverage/
+__pycache__/
+.venv/
+local-asr-service/.venv/
 
 downloads/
 download/
 exports/
 output/
+local-asr-service/tmp/
 
 *.cookie
 *.cookies

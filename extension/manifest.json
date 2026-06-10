@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Bilibili 本地 ASR 字幕助手",
+  "version": "0.2.0",
+  "version_name": "0.2-alpha",
+  "description": "录制当前标签页音频并发送到本机 ASR 服务生成字幕文档。",
+  "permissions": [
+    "tabCapture",
+    "activeTab",
+    "offscreen",
+    "downloads",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:*/*",
+    "http://localhost:*/*"
+  ],
+  "action": {
+    "default_title": "Bilibili 本地 ASR",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "minimum_chrome_version": "116"
+}
